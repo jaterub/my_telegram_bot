@@ -1,0 +1,23 @@
+﻿# --- Python cache ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# --- Entornos locales (NO subir) ---
+.venv/
+.conda/
+
+# --- Variables y secretos ---
+.env
+*.env.bak.*
+
+# --- Notebooks / IDE / sistema ---
+.ipynb_checkpoints/
+.vscode/
+.idea/
+.DS_Store
+
+# --- Logs / artefactos ---
+logs/
+*.log
