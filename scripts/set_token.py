@@ -13,9 +13,7 @@ Uso:
      (Linux/Mac) export TELEGRAM_TOKEN=123:AA...
      python scripts/set_token.py
 
-Notas:
-- No subas .env a git (añádelo a .gitignore).
-- Si mostraste tu token antes, rótalo en @BotFather y guarda el nuevo.
+ 
 """
 
 import argparse
@@ -23,6 +21,7 @@ import os
 import re
 from getpass import getpass
 from dotenv import set_key
+
 
 ENV_FILE = ".env"                 # Archivo de configuración local (no versionar)
 ENV_KEY = "TELEGRAM_TOKEN"        # Clave que usaremos en .env
