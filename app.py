@@ -87,7 +87,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("health", health))
     app.add_handler(CommandHandler("say", say))
-    app.add_handler(CommandHandler("echo", echo_cmd))     # ← /echo como comando
+    app.add_handler(CommandHandler("echo", echo_cmd))   
 
     # 2) luego texto no-comando
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo_text))
