@@ -1,0 +1,16 @@
+tx_id,date,account,debit,credit,desc
+1,2025-01-02,700,0,100,Venta A contrapartida
+1,2025-01-02,430,100,0,Venta A
+2,2025-13-05,430,50,0,Fecha inválida (mes 13)
+3,2025-02-10,430,20,0,Desbalance (debe 20, haber 0)
+4,,430,10,10,Falta fecha
+5,2025-02-11,430,,10,Debit nulo
+6,2025-02-11,430,10,,Credit nulo
+7,2025-03-01,600,30,0,Compra mercancía
+7,2025-03-01,570,0,30,Compra contrapartida (Caja)
+8,2025-03-02,430,0,0,Línea sin importe (ruido)
+9,2025-03-03,430,100,0,Duplicado tx 9 A
+9,2025-03-03,700,0,100,Duplicado tx 9 B (balanceado)
+9,2025-03-03,570,0,10,Extra línea -> crea desbalance
+10,2025-03-04,430,200,0,Venta B
+10,2025-03-04,700,0,200,Venta B contrapartida
