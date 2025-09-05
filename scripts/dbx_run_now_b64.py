@@ -27,18 +27,27 @@ def main():
     )
     b64 = base64.b64encode(csv_text.encode("utf-8")).decode("utf-8")
 
-    # 3) run-now
+     # 3) run-now
     print(f"HOST: {HOST}")
+    print(f"JOBID: {JOBID}")   ### PATCH DEBUG: aseguramos que el job_id está llegando
+
+    payload = {
+        "job_id": JOBID,
+        "notebook_params": {"csv_b64": b64, "file_name": "mini.csv"}
+    }
+
     r = requests.post(
         _url("/api/2.2/jobs/run-now"),
         headers=_h(),
-        json={"job_id": JOBID, "notebook_params": {"csv_b64": b64, "file_name": "mini.csv"}},
+        json=payload,
         timeout=60,
     )
-    r.raise_for_status()
-    run_id = r.json()["run_id"]
-    run_url = f"{HOST}/jobs/runs/{run_id}"
-    print(f"RUN lanzado: {run_id}\n{run_url}")
+
+    if r.status_code != 200:   ### PATCH DEBUG
+        print("STATUS:", r.status_code)
+        print("REQUEST PAYLOAD:", json.dumps(payload)[:400])
+        print("RESPONSE TEXT:", r.text[:1000])
+        r.raise_for_status()
 
     # 4) Polling simple (hasta ~2 min)
     for _ in range(20):
