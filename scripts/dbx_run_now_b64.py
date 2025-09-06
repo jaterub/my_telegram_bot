@@ -18,7 +18,7 @@ def main():
     if not (HOST and TOKEN and JOBID):
         raise RuntimeError("Faltan DATABRICKS_HOST / DATABRICKS_TOKEN / DATABRICKS_JOB_ID_AUDIT en .env")
 
-    # 2) CSV de prueba (minúsculo, con 1 error de fecha)
+    # 2) CSV de prueba pequeñito (una fecha inválida)
     csv_text = (
         "tx_id,date,account,debit,credit,desc\n"
         "1,2025-01-01,430,100,0,venta A\n"
@@ -27,29 +27,24 @@ def main():
     )
     b64 = base64.b64encode(csv_text.encode("utf-8")).decode("utf-8")
 
-     # 3) run-now
+    # 3) run-now (con debug)
     print(f"HOST: {HOST}")
-    print(f"JOBID: {JOBID}")   ### PATCH DEBUG: aseguramos que el job_id está llegando
+    print(f"JOBID: {JOBID}")
 
-    payload = {
-        "job_id": JOBID,
-        "notebook_params": {"csv_b64": b64, "file_name": "mini.csv"}
-    }
+    payload = {"job_id": JOBID, "notebook_params": {"csv_b64": b64, "file_name": "mini.csv"}}
+    r = requests.post(_url("/api/2.2/jobs/run-now"), headers=_h(), json=payload, timeout=60)
 
-    r = requests.post(
-        _url("/api/2.2/jobs/run-now"),
-        headers=_h(),
-        json=payload,
-        timeout=60,
-    )
-
-    if r.status_code != 200:   ### PATCH DEBUG
+    if r.status_code != 200:
         print("STATUS:", r.status_code)
         print("REQUEST PAYLOAD:", json.dumps(payload)[:400])
         print("RESPONSE TEXT:", r.text[:1000])
         r.raise_for_status()
 
-    # 4) Polling simple (hasta ~2 min)
+    run_id = r.json()["run_id"]  # ← IMPORTANTE: definir run_id
+    run_url = f"{HOST}/jobs/runs/{run_id}"
+    print(f"RUN lanzado: {run_id}\n{run_url}")
+
+    # 4) Polling (hasta ~2 min)
     for _ in range(20):
         s = requests.get(_url("/api/2.2/jobs/runs/get"), headers=_h(), params={"run_id": run_id}, timeout=60)
         s.raise_for_status()
