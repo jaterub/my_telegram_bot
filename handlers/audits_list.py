@@ -1,5 +1,5 @@
 # handlers/audits_list.py
-import datetime as dt
+import datetime as dt, json
 from telegram import Update
 from telegram.ext import ContextTypes, CommandHandler
 from db import sqlite_store as store
@@ -16,8 +16,9 @@ async def audits_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = []
     for r in rows:
         s = r["summary"]
-        # intenta extraer datos clave del resumen JSON
         try:
+            if isinstance(s, str):
+                s = json.loads(s)
             inv = s.get("invalid_date", {}).get("count")
             dup = s.get("duplicates_tx", {}).get("count")
             unb = s.get("unbalanced_tx", {}).get("count")
@@ -29,7 +30,7 @@ async def audits_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append(
             f"#{r['id']} · {r['file_name']} · { _fmt_ts(r['created_at']) }\n"
             f"  {headline}\n"
-            f"  {r['run_url'] or ''}"
+            f"  {r.get('run_url','')}"
         )
 
     await update.message.reply_text("Últimas auditorías:\n\n" + "\n".join(lines))

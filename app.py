@@ -2,7 +2,10 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # Bot PTB: /start /help /health /say /echo + registro de /audit y /audits
 # ─────────────────────────────────────────────────────────────────────────────
+import logging
+from dotenv import load_dotenv
 
+load_dotenv()
 import logging, time
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 from telegram import Update
@@ -10,8 +13,10 @@ from telegram.error import NetworkError
 
 from config import setup_logging, load_token
 from db import sqlite_store as store
-from handlers.audit import register_handlers as register_audit
+from handlers.audit_xlsx import register_handlers as register_audit
+
 from handlers.audits_list import register_handlers as register_audits_list
+
 
 # ---- comandos básicos ----
 
