@@ -1,21 +1,28 @@
 # handlers/audit_xlsx.py
 # ─────────────────────────────────────────────────────────────────────────────
-# /audit: recibe .xlsx → lo codifica en base64 → Databricks Jobs run-now
+# /audit: recibe .xlsx → (sube a DBFS) → Databricks Jobs run-now con file_path
 # Polling → get-output → formatea JSON en viñetas y responde en Telegram
 # (opcional) guarda histórico en SQLite si está disponible
 # ─────────────────────────────────────────────────────────────────────────────
 
-import os, asyncio, base64, json, requests
+# (imports únicos)
+import os, json, base64, asyncio, requests
 from pathlib import Path
 from telegram import Update
 from telegram.ext import ContextTypes, CommandHandler, MessageHandler, filters
+from formatters.audit import fmt_summary
+DBFS_BASE = os.getenv("DATABRICKS_DBFS_BASE", "").rstrip("/")
 
-# ---------- Configuración (leída en runtime para evitar problemas de orden) ----------
+# Constantes + cfg únicas
+TASK_KEY = os.getenv("DATABRICKS_TASK_KEY", "")
+MAX_SIZE = 15_000_000
+
 def _cfg():
     host  = (os.getenv("DATABRICKS_HOST") or "").rstrip("/")
     token = os.getenv("DATABRICKS_TOKEN") or ""
     job   = int(os.getenv("DATABRICKS_JOB_ID_AUDIT", "0") or "0")
     return host, token, job
+
 
 def _h(token: str):
     return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
@@ -23,17 +30,62 @@ def _h(token: str):
 def _url(host: str, p: str) -> str:
     return f"{host}{p}"
 
-# ---------- Llamadas síncronas a la API (se ejecutan en threads) ----------
-def _run_now_sync(job_id: int, file_b64: str, host: str, token: str) -> int:
-    payload = {"job_id": job_id, "notebook_params": {"file_b64": file_b64}}
-    r = requests.post(f"{host}/api/2.2/jobs/run-now",
-                      headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-                      json=payload, timeout=60)
-    if r.status_code >= 400:
-        # 👇 imprime el cuerpo para saber la causa (param no válido, tipo de tarea, etc.)
-        raise requests.HTTPError(f"{r.status_code} {r.reason}: {r.text}")
-    return r.json()["run_id"]
+# ===== DBFS helpers (upload por bloques) =====================================
+import base64 as _b64
 
+def _dbfs_create_sync(path: str, host: str, token: str, overwrite: bool = True) -> int:
+    r = requests.post(
+        f"{host}/api/2.0/dbfs/create",
+        headers=_h(token),
+        json={"path": path, "overwrite": overwrite},
+        timeout=60,
+    )
+    r.raise_for_status()
+    return r.json()["handle"]
+
+def _dbfs_add_block_sync(handle: int, data_bytes: bytes, host: str, token: str):
+    chunk_b64 = _b64.b64encode(data_bytes).decode("utf-8")
+    r = requests.post(
+        f"{host}/api/2.0/dbfs/add-block",
+        headers=_h(token),
+        json={"handle": handle, "data": chunk_b64},
+        timeout=60,
+    )
+    r.raise_for_status()
+
+def _dbfs_close_sync(handle: int, host: str, token: str):
+    r = requests.post(
+        f"{host}/api/2.0/dbfs/close",
+        headers=_h(token),
+        json={"handle": handle},
+        timeout=60,
+    )
+    r.raise_for_status()
+
+def _dbfs_upload_sync(path: str, data: bytes, host: str, token: str, chunk_size: int = 1024 * 1024):
+    """Sube 'data' a DBFS en bloques (~1 MB)."""
+    h = _dbfs_create_sync(path, host, token, overwrite=True)
+    try:
+        for i in range(0, len(data), chunk_size):
+            _dbfs_add_block_sync(h, data[i:i + chunk_size], host, token)
+    finally:
+        _dbfs_close_sync(h, host, token)
+
+# ===== Jobs API helpers =======================================================
+def _run_now_sync_with_path(job_id: int, file_path: str, host: str, token: str) -> int:
+    """Lanza el Job pasando 'file_path' (dbfs:/...) como parámetro de notebook."""
+    payload = {"job_id": job_id, "notebook_params": {"file_path": file_path}}
+    r = requests.post(
+        f"{host}/api/2.2/jobs/run-now",
+        headers=_h(token),
+        json=payload,
+        timeout=60,
+    )
+    if r.status_code >= 400:
+        raise requests.HTTPError(
+            f"{r.status_code} {r.reason}: {r.text}  (host={host}, job_id={job_id})"
+        )
+    return r.json()["run_id"]
 
 def _get_state_sync(run_id: int, host: str, token: str) -> dict:
     r = requests.get(_url(host, "/api/2.2/jobs/runs/get"), headers=_h(token), params={"run_id": run_id}, timeout=60)
@@ -43,8 +95,22 @@ def _get_state_sync(run_id: int, host: str, token: str) -> dict:
 def _get_output_sync(run_id: int, host: str, token: str) -> str:
     r = requests.get(_url(host, "/api/2.1/jobs/runs/get-output"), headers=_h(token), params={"run_id": run_id}, timeout=60)
     r.raise_for_status()
-    # Esperamos un result string (JSON) de notebook_output
-    return r.json().get("notebook_output", {}).get("result", "")
+    return (r.json().get("notebook_output") or {}).get("result", "") or ""
+
+def _get_run_sync(run_id: int, host: str, token: str) -> dict:
+    r = requests.get(f"{host}/api/2.1/jobs/runs/get", headers=_h(token), params={"run_id": run_id}, timeout=60)
+    r.raise_for_status()
+    return r.json()
+
+def _list_task_run_ids_sync(parent_run_id: int, host: str, token: str) -> list[int]:
+    """Devuelve los run_id de tareas si el run es 'parent' (multi-task); si no, lista vacía."""
+    data = _get_run_sync(parent_run_id, host, token)
+    tasks = data.get("tasks") or []
+    return [t.get("run_id") for t in tasks if t.get("run_id")]
+
+# ----------
+
+
 
 # ---------- (A) FORMATEADOR EN VIÑETAS PARA TELEGRAM ----------
 def _fmt_summary(summary: dict) -> str:
@@ -77,104 +143,144 @@ def _fmt_summary(summary: dict) -> str:
     ]
     return "\n".join(parts)
 
-# ---------- Persistencia opcional ----------
+
+
+MAX_SIZE = 15_000_000
+
+# ---------- Handlers ----------
+# Persistencia opcional (SQLite)
 try:
     from db import sqlite_store as store
     _HAS_STORE = True
 except Exception:
     _HAS_STORE = False
 
-MAX_SIZE = 2_000_000  # ~2 MB para la demo
+# ===== Handlers ===============================================================
 
-# ---------- Handlers ----------
 async def audit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     host, token, job_id = _cfg()
     if not (host and token and job_id):
-        return await update.message.reply_text("⚠️ Configura DATABRICKS_HOST, DATABRICKS_TOKEN y DATABRICKS_JOB_ID_AUDIT en .env")
+        return await update.message.reply_text(
+            "⚠️ Configura DATABRICKS_HOST, DATABRICKS_TOKEN y DATABRICKS_JOB_ID_AUDIT en .env"
+        )
     await update.message.reply_text(
         "🔎 Auditoría contable: envíame tu Excel (.xlsx) como *documento*.\n"
         "Validaré fechas, duplicados, desbalances y campos obligatorios. ⚖️"
     )
+
 async def audit_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # 0) Config en runtime (evita problemas de orden de imports)
-    host, token, job_id = _cfg()
-    if not (host and token and job_id):
-        return await update.message.reply_text("⚠️ Config de Databricks incompleta. Revisa .env")
+    try:
+        # 0) Config y validaciones iniciales
+        host, token, job_id = _cfg()
+        if not (host and token and job_id):
+            return await update.message.reply_text("⚠️ Config de Databricks incompleta. Revisa .env")
 
-    # 1) Validación del documento
-    doc = update.message.document
-    if not doc or not doc.file_name.lower().endswith(".xlsx"):
-        return await update.message.reply_text("⚠️ Necesito un Excel con extensión .xlsx (envíalo como *documento*).")
+        doc = update.message.document
+        if not doc or not doc.file_name.lower().endswith(".xlsx"):
+            return await update.message.reply_text("⚠️ Necesito un Excel .xlsx (envíalo como *documento*).")
 
-    # 2) Descargar localmente (bot)
-    tmp_dir = Path("tmp"); tmp_dir.mkdir(exist_ok=True)
-    local_path = tmp_dir / f"{update.effective_chat.id}_{doc.file_name}"
-    tg_file = await context.bot.get_file(doc.file_id)
-    await tg_file.download_to_drive(str(local_path))
+        await update.message.reply_text("📥 Recibido. Descargando archivo…")
+        tmp_dir = Path("tmp")
+        tmp_dir.mkdir(exist_ok=True)
+        local_path = tmp_dir / f"{update.effective_chat.id}_{doc.file_name}"
+        tg_file = await context.bot.get_file(doc.file_id)
+        await tg_file.download_to_drive(str(local_path))
 
-    data = local_path.read_bytes()
-    if len(data) > MAX_SIZE:
-        return await update.message.reply_text("Archivo demasiado grande para esta demo (máx ~2 MB).")
+        data = local_path.read_bytes()
+        if len(data) > MAX_SIZE:
+            return await update.message.reply_text(
+                f"⚠️ Archivo demasiado grande para esta demo (máx ~{MAX_SIZE//1_000_000} MB)."
+            )
 
-    file_b64 = base64.b64encode(data).decode("utf-8")
+        # 1) Subir a DBFS y lanzar Job con file_path (evita límite 10KB en notebook_params)
+        dbfs_rel_path = f"/tmp/bot_audit/{update.effective_chat.id}_{doc.file_name}"
+        dbfs_uri = f"dbfs:{dbfs_rel_path}"
+        await update.message.reply_text(f"📤 Subiendo a DBFS…\n{dbfs_rel_path}")
+        try:
+            await asyncio.to_thread(_dbfs_upload_sync, dbfs_rel_path, data, host, token)
+        except Exception as e:
+            return await update.message.reply_text(f"❌ Error subiendo a DBFS: {e}")
 
-    # 3) Lanzar Job en Databricks
-    run_id = await asyncio.to_thread(_run_now_sync, job_id, file_b64, host, token)
-    await update.message.reply_text(
-        f"🚀 Ejecutando auditoría en Databricks…\nrun_id={run_id}\nTe aviso al terminar."
-    )
-    run_url = f"{host}/jobs/runs/{run_id}"
+        await update.message.reply_text("🔐 Lanzando auditoría en Databricks…")
+        try:
+            run_id = await asyncio.to_thread(_run_now_sync_with_path, job_id, dbfs_uri, host, token)
+        except Exception as e:
+            return await update.message.reply_text(f"❌ Error al lanzar Job: {e}")
 
-    # 4) Polling ROBUSTO: espera a que termine (con timeout)
-    max_secs = 600   # hasta 10 min
-    interval = 5     # consulta cada 5s
-    waited = 0
-    final_state = None
-
-    while waited < max_secs:
-        state = await asyncio.to_thread(_get_state_sync, run_id, host, token)
-        life  = state.get("life_cycle_state")
-        rstate = state.get("result_state")
-        # Termina cuando ya no está en estado en ejecución
-        if life in {"TERMINATED", "INTERNAL_ERROR", "SKIPPED"}:
-            final_state = state
-            break
-        await asyncio.sleep(interval)
-        waited += interval
-
-    if not final_state:
-        # Timeout
-        return await update.message.reply_text(
-            "⏱️ La ejecución está tardando más de lo previsto (sigue en RUNNING). "
-            "Vuelve a intentar en unos minutos."
+        run_url = f"{host}/jobs/runs/{run_id}"
+        await update.message.reply_text(
+            f"🚀 Ejecutando auditoría…\nJob: {job_id}\nHost: {host}\nrun_id={run_id}\n{run_url}"
         )
 
-    # 5) Lectura del output con reintentos (a veces tarda en publicarse)
-    output = ""
-    for _ in range(12):  # ~60s de margen extra
-        try:
+        # 2) Polling del estado del run (parent)
+        max_secs = 600
+        interval = 5
+        waited = 0
+        final_state = None
+
+        while waited < max_secs:
+            state = await asyncio.to_thread(_get_state_sync, run_id, host, token)
+            life = state.get("life_cycle_state")
+            if life in {"TERMINATED", "INTERNAL_ERROR", "SKIPPED"}:
+                final_state = state
+                break
+            if waited in (0, 30, 60):
+                await update.message.reply_text(f"⏳ Estado: {life or 'N/A'}…")
+            await asyncio.sleep(interval)
+            waited += interval
+
+        if not final_state:
+            return await update.message.reply_text(
+                "⏱️ Timeout: la ejecución sigue en curso. Vuelve a intentarlo en unos minutos."
+            )
+
+        # 3) Obtener output (soporta parent-run y task-runs)
+        output = ""
+        task_run_ids = []
+        for attempt in range(24):  # ~120s extra
+            # 3.1 intenta directo en el run_id recibido (si el job tiene 1 task, a veces ya es task-run)
             output = await asyncio.to_thread(_get_output_sync, run_id, host, token)
             if output:
                 break
-        except Exception:
-            pass
-        await asyncio.sleep(5)
 
-    if not output:
-        status = f"{final_state.get('life_cycle_state')}/{final_state.get('result_state')}"
-        return await update.message.reply_text(
-            "⚠️ No pude leer la salida del Job todavía.\n"
-            f"Estado final: {status}\n"
-            "Asegúrate de que el notebook termine con dbutils.notebook.exit(JSON)."
-        )
+            # 3.2 si no hay, intenta en las task-runs del parent
+            if not task_run_ids:
+                try:
+                    task_run_ids = await asyncio.to_thread(_list_task_run_ids_sync, run_id, host, token)
+                except Exception:
+                    task_run_ids = []
 
-    # 6) Formatear el JSON a viñetas “humanas” y responder
-    try:
-        summary = json.loads(output) if isinstance(output, str) else output
-        text = _fmt_summary(summary)
+            if task_run_ids:
+                for tr in task_run_ids:
+                    output = await asyncio.to_thread(_get_output_sync, tr, host, token)
+                    if output:
+                        break
+                if output:
+                    break
+
+            await asyncio.sleep(5)
+
+        if not output:
+            status = f"{final_state.get('life_cycle_state')}/{final_state.get('result_state')}"
+            extra = f"\n(run_id job={run_id}, task_runs={task_run_ids or 'N/A'})"
+            return await update.message.reply_text(
+                "⚠️ No pude leer la salida del Job todavía.\n"
+                f"Estado final: {status}{extra}\n"
+                "Asegúrate de que el notebook termine con dbutils.notebook.exit(JSON)."
+            )
+
+        # 4) Formatear JSON y responder
+        try:
+            summary = json.loads(output) if isinstance(output, str) else output
+        except Exception as e:
+            return await update.message.reply_text(
+                f"⚠️ Salida no válida (no es JSON parseable): {e}\n\nOutput crudo:\n{output[:2000]}"
+            )
+
+        text = fmt_summary(summary)
         await update.message.reply_markdown(text)
 
-        # 7) Persistencia opcional en SQLite
+        # 5) Guardado opcional en SQLite
         if _HAS_STORE:
             try:
                 store.init()
@@ -189,11 +295,16 @@ async def audit_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
 
     except Exception as e:
-        await update.message.reply_text(f"⚠️ Salida no válida (no es JSON parseable): {e}")
-
+        # fallback
+        await update.message.reply_text(f"❌ Error inesperado en audit_doc: {e}")
 
 def register_handlers(app):
     app.add_handler(CommandHandler("audit", audit_cmd))
     # Excel por MIME y por extensión
-    app.add_handler(MessageHandler(filters.Document.MimeType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"), audit_doc))
+    app.add_handler(
+        MessageHandler(
+            filters.Document.MimeType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+            audit_doc,
+        )
+    )
     app.add_handler(MessageHandler(filters.Document.FileExtension("xlsx"), audit_doc))
