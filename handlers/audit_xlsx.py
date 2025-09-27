@@ -12,12 +12,16 @@ from pathlib import Path
 from utils.databricks_upload import comprimir_excel_a_zip, subir_a_workspace
 
 
-
+import json, base64, uuid,gzip
 from wsfiles_check import verificar_existencia_por_export,listar_y_exportar_archivo_debug
 
+from utils.db import insert_audit
+
+from utils.db import get_last_audits
 
 
-import json, base64, uuid,gzip
+
+
 def _run_now_latest(job_id: str, ws_path: str, host: str, token: str) -> int:
     """
     Lanza el job indicando la ruta completa del archivo (ws_path).
@@ -608,8 +612,8 @@ def _fmt_summary(summary: dict) -> str:
 
 MAX_SIZE = 20_000_000
 
-# ---------- Handlers ----------
-# Persistencia opcional (SQLite)
+
+# Persistencia opcional (SQLite) Borrar??
 try:
     from db import sqlite_store as store
     _HAS_STORE = True
@@ -617,6 +621,18 @@ except Exception:
     _HAS_STORE = False
 
 # ===== Handlers ===============================================================
+
+
+async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    rows = get_last_audits(5)  # últimas 5 auditorías
+    if not rows:
+        return await update.message.reply_text("📭 No hay auditorías registradas todavía.")
+
+    msg = ["📜 Últimas auditorías:"]
+    for id, filename, created_at, summary_json in rows:
+        msg.append(f"- {filename} ({created_at})")
+
+    await update.message.reply_text("\n".join(msg))
 
 async def audit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     host, token, job_id = _cfg()
@@ -648,7 +664,8 @@ async def audit_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         local_path = tmp_dir / file_name
         tg_file = await context.bot.get_file(doc.file_id)
         await tg_file.download_to_drive(str(local_path))
-        # ✅ Verifica si es un .xlsx válido (cabecera de archivo tipo ZIP)
+
+        # ✅ Verifica si es un .xlsx válido (cabecera ZIP)
         print("[DEBUG] Validando contenido real del archivo...")
         with open(local_path, "rb") as f:
             cabecera = f.read(4)
@@ -658,8 +675,7 @@ async def audit_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             print("[❌] NO parece un Excel. Posible JSON o formato incorrecto.")
 
-
-    #    2) Subida al Workspace Files
+        # 2) Subida al Workspace Files
         await update.message.reply_text("📤 Subiendo a Workspace Files…")
         try:
             ws_path = await asyncio.to_thread(subir_a_workspace, str(local_path))
@@ -668,8 +684,6 @@ async def audit_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         print("[DEBUG] Archivo subido a Workspace:", ws_path)
 
-        
-        
         await asyncio.to_thread(listar_y_exportar_archivo_debug, WS_INBOX_DIR, file_name)
 
         # 3) Verificación de existencia usando /workspace/export
@@ -683,14 +697,12 @@ async def audit_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             return await update.message.reply_text("⚠️ El archivo aún no está disponible en Workspace Files. Intenta más tarde.")
 
-        # 4) Lanza auditoría sobre la carpeta
+        # 4) Lanza auditoría
         await update.message.reply_text(
             f"✅ Subido: `{ws_path}`\n"
             f"🚀 Lanzando auditoría sobre la *última* subida en `{WS_INBOX_DIR}`…",
         )
         run_id = _run_now_with_ws_path(job_id, ws_path, host, token)
-
-
 
         run_url = f"{host}/jobs/runs/{run_id}"
         await update.message.reply_text(f"⏳ run_id={run_id}\n{run_url}")
@@ -710,7 +722,7 @@ async def audit_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not final_state:
             return await update.message.reply_text("⏱ Timeout: la ejecución sigue en curso. Intenta luego.")
 
-        # 6) Leer salida (parent o tasks)
+        # 6) Leer salida
         output, task_run_ids = "", []
         for _ in range(24):  # ~120s extra
             output = await asyncio.to_thread(_safe_get_output_sync, run_id, host, token)
@@ -745,16 +757,22 @@ async def audit_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"⚠️ Salida no válida (no es JSON parseable): {e}\n\nOutput crudo:\n{output[:2000]}"
             )
 
+        # Mostrar en Telegram
         await update.message.reply_markdown(fmt_summary(summary))
+
+        # Guardar en base de datos
+        from utils.db import insert_audit
+        insert_audit(file_name, json.dumps(summary, ensure_ascii=False))
 
     except Exception as e:
         await update.message.reply_text(f"❌ Error inesperado en audit_doc: {e}")
 
 
-
-
-
 def register_handlers(app):
+
+
+
+    app.add_handler(CommandHandler("history", history_cmd))
     app.add_handler(CommandHandler("audit", audit_cmd))
     app.add_handler(
         MessageHandler(
