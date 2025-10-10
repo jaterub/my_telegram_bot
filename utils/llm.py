@@ -4,9 +4,8 @@ from typing import List, Dict, Any, Optional
 from openai import OpenAI
 
 
+_OPENAI_MODEL_CHAT = os.getenv("OPENAI_MODEL_CHAT", "gpt-4o")
 
-
-_OPENAI_MODEL_CHAT = os.getenv("OPENAI_MODEL_CHAT", "gpt-4o-mini")
 _OPENAI_MODEL_WHISPER = os.getenv("OPENAI_MODEL_WHISPER", "whisper-1")
 
 _client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
