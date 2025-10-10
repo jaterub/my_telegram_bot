@@ -660,33 +660,31 @@ async def audit_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # 1) Descarga local
         await update.message.reply_text("📅 Recibido. Descargando archivo…")
         tmp_dir = Path("tmp"); tmp_dir.mkdir(exist_ok=True)
-        file_name = doc.file_name  # evita meter el ID
+        file_name = doc.file_name
         local_path = tmp_dir / file_name
         tg_file = await context.bot.get_file(doc.file_id)
         await tg_file.download_to_drive(str(local_path))
 
-        # ✅ Verifica si es un .xlsx válido (cabecera ZIP)
+        # ✅ Verifica cabecera ZIP
         print("[DEBUG] Validando contenido real del archivo...")
         with open(local_path, "rb") as f:
             cabecera = f.read(4)
-
         if cabecera[:2] == b'PK':
             print("[OK] Parece un archivo Excel real (.xlsx)")
         else:
             print("[❌] NO parece un Excel. Posible JSON o formato incorrecto.")
 
-        # 2) Subida al Workspace Files
+        # 2) Subida a Workspace
         await update.message.reply_text("📤 Subiendo a Workspace Files…")
         try:
             ws_path = await asyncio.to_thread(subir_a_workspace, str(local_path))
         except Exception as e:
             return await update.message.reply_text(f"❌ Error al subir archivo a Databricks:\n{e}")
-
         print("[DEBUG] Archivo subido a Workspace:", ws_path)
 
         await asyncio.to_thread(listar_y_exportar_archivo_debug, WS_INBOX_DIR, file_name)
 
-        # 3) Verificación de existencia usando /workspace/export
+        # 3) Verificación
         await update.message.reply_text("🔍 Verificando disponibilidad del archivo en Workspace Files…")
         for intento in range(20):
             exists = await asyncio.to_thread(verificar_existencia_por_export, ws_path)
@@ -703,7 +701,6 @@ async def audit_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🚀 Lanzando auditoría sobre la *última* subida en `{WS_INBOX_DIR}`…",
         )
         run_id = _run_now_with_ws_path(job_id, ws_path, host, token)
-
         run_url = f"{host}/jobs/runs/{run_id}"
         await update.message.reply_text(f"⏳ run_id={run_id}\n{run_url}")
 
@@ -718,7 +715,6 @@ async def audit_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 break
             await asyncio.sleep(interval)
             waited += interval
-
         if not final_state:
             return await update.message.reply_text("⏱ Timeout: la ejecución sigue en curso. Intenta luego.")
 
@@ -749,7 +745,7 @@ async def audit_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Asegúrate de que el notebook termina con dbutils.notebook.exit(JSON)."
             )
 
-        # 7) Formateo y respuesta
+        # 7) Parsear JSON
         try:
             summary = json.loads(output) if isinstance(output, str) else output
         except Exception as e:
@@ -757,12 +753,25 @@ async def audit_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"⚠️ Salida no válida (no es JSON parseable): {e}\n\nOutput crudo:\n{output[:2000]}"
             )
 
-        # Mostrar en Telegram
-        await update.message.reply_markdown(fmt_summary(summary))
-
-        # Guardar en base de datos
+        # 8) Resumen bonito con LLM
+        from utils.llm import summarize_audit_spanish
         from utils.db import insert_audit
-        insert_audit(file_name, json.dumps(summary, ensure_ascii=False))
+        try:
+            pretty = summarize_audit_spanish(summary)
+        except Exception as e:
+            pretty = None
+
+        # 9) Guardar en SQLite
+        try:
+            insert_audit(file_name, json.dumps(summary, ensure_ascii=False), run_url=run_url, llm_summary=pretty)
+        except Exception as e:
+            print(f"[WARN] No se pudo guardar en SQLite: {e}")
+
+        # 10) Respuesta al usuario
+        if pretty:
+            await update.message.reply_text(pretty)
+        else:
+            await update.message.reply_markdown(fmt_summary(summary))
 
     except Exception as e:
         await update.message.reply_text(f"❌ Error inesperado en audit_doc: {e}")

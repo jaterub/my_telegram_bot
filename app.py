@@ -19,6 +19,10 @@ from handlers.audit_xlsx import register_handlers as register_audit
 from handlers.audits_list import register_handlers as register_audits_list
 from utils.db import init_db
 
+# ───llm--------
+
+from handlers.history import register_handlers as register_history
+from handlers.llm_chat import register_handlers as register_llm_chat
 
 # ─── Comandos básicos ───────────────────────────────────────
 
@@ -57,7 +61,6 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ─── Construcción de la app ─────────────────────────────────
-
 def build_app() -> Application:
     load_dotenv()
     setup_logging("INFO")
@@ -66,17 +69,12 @@ def build_app() -> Application:
     token = load_token()
     app = Application.builder().token(token).build()
 
-    # comandos principales
+    # ─── comandos principales ──────────────────────────────────────
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("health", health))
     app.add_handler(CommandHandler("say", say))
     app.add_handler(CommandHandler("echo", echo_cmd))
-
-    # texto sin comando → eco
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo_text))
-
-    # errores
     app.add_error_handler(on_error)
 
     return app
@@ -86,11 +84,16 @@ def build_app() -> Application:
 
 app = build_app()
 
-# inicializa BD y registra handlers externos
-store.init()
-init_db()
-register_audit(app)
-register_audits_list(app)
+
+# ─── Inicialización de DB y registro de handlers ─────────────────────
+init_db()                     # asegura tabla audits en SQLite
+register_audit(app)           # /audit → subida de Excel y auditoría
+register_audits_list(app)     # /audits → últimos resultados simples
+register_history(app)         # /history → historial con llm_summary si existe
+register_llm_chat(app)        # /chat, /reset → conversación con LLM (texto/voz)
+
+
+
 
 if __name__ == "__main__":
     while True:
