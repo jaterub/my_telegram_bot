@@ -22,6 +22,7 @@ from utils.db import get_last_audits
 
 
 
+
 def _run_now_latest(job_id: str, ws_path: str, host: str, token: str) -> int:
     """
     Lanza el job indicando la ruta completa del archivo (ws_path).
@@ -82,64 +83,165 @@ def _fmt_items(items, keys, max_rows=10):
         out.append(f"  • … y {more} más")
     return "\n".join(out) if out else "  • (sin muestras)"
 
-def fmt_summary(s: dict) -> str:
-    meta = s.get("meta", {})
-    filename   = meta.get("filename") or meta.get("path") or "input.xlsx"
-    source     = meta.get("source", "?")
-    path       = meta.get("path") or meta.get("local_path") or ""
-    rows_raw   = meta.get("rows_pandas_raw", "¿?")
-    rows_final = s.get("rows", "¿?")
 
-    invalid    = s.get("invalid_date", {}) or {}
-    dups       = s.get("duplicates_tx", {}) or {}
-    unbal      = s.get("unbalanced_tx", {}) or {}
-    reqnull    = s.get("required_nulls", {}) or {}
+def fmt_summary(summary: dict) -> str:
+    """Convierte el JSON del notebook (incluida la tabla mensual) a texto legible para Telegram."""
+    def format_items(items, max_count=5):
+        lines = []
+        for it in items[:max_count]:
+            fila = it.get("row", "?")
+            emp = it.get("company_code", "")
+            tx = it.get("tx_id", "")
+            fecha = it.get("date", "")
+            cuenta = it.get("account", "")
+            deb = it.get("debit", "")
+            cred = it.get("credit", "")
+            mon = it.get("currency", "")
+            detalle = []
+            if emp: detalle.append(f"Empresa: `{emp}`")
+            if tx: detalle.append(f"TX: `{tx}`")
+            if fecha: detalle.append(f"Fecha: `{fecha}`")
+            if cuenta: detalle.append(f"Cuenta: `{cuenta}`")
+            if deb or cred: detalle.append(f"D={deb or '0'} / C={cred or '0'}")
+            if mon: detalle.append(f"Moneda: `{mon}`")
+            lines.append(f"  • Fila {fila} — " + " — ".join(detalle))
+        if len(items) > max_count:
+            lines.append(f"  • … y {len(items) - max_count} más")
+        return "\n".join(lines) if lines else "  • (sin ejemplos disponibles)"
 
-    lines = []
-    lines.append(f"*Auditoría de Excel*  —  `{_md_escape(filename)}`")
-    lines.append("")
-    lines.append(f"- Origen: `{_md_escape(source)}`")
-    if path:
-        lines.append(f"- Ruta: `{_md_escape(path)}`")
-    lines.append(f"- Filas (pandas crudo): `{rows_raw}`")
-    lines.append(f"- Filas (tras normalización): `{rows_final}`")
-    lines.append("")
+    # --- Secciones base ---
+    filas_total = summary.get("rows", 0)
+    invalid = summary.get("invalid_date", {}) or {}
+    dups = summary.get("duplicates_tx", {}) or {}
+    unbal = summary.get("unbalanced_tx", {}) or {}
+    reqnull = summary.get("required_nulls", {}) or {}
 
-    # Resumen de conteos
-    lines.append("*Resumen de validaciones*")
-    lines.append(f"- Fechas inválidas: `{invalid.get('count', 0)}`")
-    lines.append(f"- Duplicados por clave: `{dups.get('count', 0)}`")
-    lines.append(f"- Asientos desbalanceados: `{unbal.get('count', 0)}`")
-    lines.append(f"- Obligatorios nulos: `{reqnull.get('count', 0)}`")
-    lines.append("")
+    parts = [f"📊 *Auditoría del archivo Excel contable*",
+             f"────────────────────────────",
+             f"📦 **Total de filas analizadas:** {filas_total}",
+             f"────────────────────────────"]
 
-    # Muestras
-    if invalid.get("count", 0):
-        lines.append("*Fechas inválidas (muestra)*")
-        lines.append(_fmt_items(invalid.get("items", []), ["row","company_code","tx_id","date"]))
-        lines.append("")
+    # ===== Fechas inválidas =====
+    parts.append("📅 *Fechas inválidas*")
+    parts.append(f"• Total: `{invalid.get('count', 0)}`")
+    if invalid.get("count"):
+        parts.append(format_items(invalid.get("items", [])))
+    else:
+        parts.append("• ✅ Ninguna fecha inválida detectada.")
+    parts.append("────────────────────────────")
 
-    if dups.get("count", 0):
-        lines.append("*Duplicados por clave (muestra)*")
-        lines.append(_fmt_items(dups.get("items", []), ["row","company_code","tx_id","date","account","debit","credit","currency"]))
-        lines.append("")
+    # ===== Duplicados =====
+    parts.append("♻️ *Transacciones duplicadas*")
+    parts.append(f"• Total: `{dups.get('count', 0)}`")
+    if dups.get("count"):
+        parts.append(format_items(dups.get("items", [])))
+    else:
+        parts.append("• ✅ Ninguna duplicada detectada.")
+    parts.append("────────────────────────────")
 
-    if unbal.get("count", 0):
-        lines.append("*Asientos desbalanceados (muestra)*")
-        # group_cols + sums/diff ya vienen en items
-        lines.append(_fmt_items(unbal.get("items", []), ["company_code","tx_id","currency","sum_debit","sum_credit","diff"]))
-        lines.append("")
+    # ===== Desbalances =====
+    parts.append("⚖️ *Desbalances contables*")
+    parts.append(f"• Total: `{unbal.get('count', 0)}`")
+    if unbal.get("count"):
+        for it in unbal.get("items", [])[:5]:
+            parts.append(
+                f"  • TX `{it.get('tx_id', '')}` — Empresa `{it.get('company_code', '')}` — "
+                f"D={it.get('sum_debit', 0)} / C={it.get('sum_credit', 0)} — Δ={it.get('diff', 0)}"
+            )
+    else:
+        parts.append("• ✅ Sin desbalances encontrados.")
+    parts.append("────────────────────────────")
 
-    if reqnull.get("count", 0):
-        lines.append("*Campos obligatorios nulos (muestra)*")
-        lines.append(_fmt_items(reqnull.get("items", []), ["row","company_code","tx_id","account","date"]))
-        lines.append("")
+    # ===== Nulos =====
+    parts.append("❗ *Campos obligatorios vacíos*")
+    parts.append(f"• Total: `{reqnull.get('count', 0)}`")
+    if reqnull.get("count"):
+        parts.append(format_items(reqnull.get("items", [])))
+    else:
+        parts.append("• ✅ Ningún campo obligatorio vacío.")
+    parts.append("────────────────────────────")
 
-    # Si todo está OK
+    # ===== Nueva tabla mensual =====
+    tabla = summary.get("tabla_mensual")
+    if tabla:
+        parts.append("📆 *Tabla final de referencia (Ene–Jun 2025)*")
+        parts.append("Mes | Duplicados | Desbalanceadas | Nulos req. | Monedas inválidas | Fechas inconsistentes | Tendencia")
+        parts.append(":--|--:|--:|--:|--:|--:|:--")
+        for fila in tabla:
+            parts.append(
+                f"{fila['Mes']} | {fila['Duplicados']} | {fila['Desbalanceadas']} | "
+                f"{fila['Nulos req.']} | {fila['Monedas inválidas']} | {fila['Fechas inconsistentes']} | {fila['Tendencia general']}"
+            )
+        parts.append("────────────────────────────")
+
+    # ===== Conclusión =====
     if not any([invalid.get("count"), dups.get("count"), unbal.get("count"), reqnull.get("count")]):
-        lines.append("✅ *Sin incidencias relevantes*")
+        parts.append("✅ *Sin incidencias relevantes detectadas.*")
+    else:
+        parts.append("⚠️ *Revisa los apartados anteriores para más detalle.*")
 
-    return "\n".join(lines)
+    return "\n".join(parts)
+
+
+
+# def fmt_summary(s: dict) -> str:
+#     meta = s.get("meta", {})
+#     filename   = meta.get("filename") or meta.get("path") or "input.xlsx"
+#     source     = meta.get("source", "?")
+#     path       = meta.get("path") or meta.get("local_path") or ""
+#     rows_raw   = meta.get("rows_pandas_raw", "¿?")
+#     rows_final = s.get("rows", "¿?")
+
+#     invalid    = s.get("invalid_date", {}) or {}
+#     dups       = s.get("duplicates_tx", {}) or {}
+#     unbal      = s.get("unbalanced_tx", {}) or {}
+#     reqnull    = s.get("required_nulls", {}) or {}
+
+#     lines = []
+#     lines.append(f"*Auditoría de Excel*  —  `{_md_escape(filename)}`")
+#     lines.append("")
+#     lines.append(f"- Origen: `{_md_escape(source)}`")
+#     if path:
+#         lines.append(f"- Ruta: `{_md_escape(path)}`")
+#     lines.append(f"- Filas (pandas crudo): `{rows_raw}`")
+#     lines.append(f"- Filas (tras normalización): `{rows_final}`")
+#     lines.append("")
+
+#     # Resumen de conteos
+#     lines.append("*Resumen de validaciones*")
+#     lines.append(f"- Fechas inválidas: `{invalid.get('count', 0)}`")
+#     lines.append(f"- Duplicados por clave: `{dups.get('count', 0)}`")
+#     lines.append(f"- Asientos desbalanceados: `{unbal.get('count', 0)}`")
+#     lines.append(f"- Obligatorios nulos: `{reqnull.get('count', 0)}`")
+#     lines.append("")
+
+#     # Muestras
+#     if invalid.get("count", 0):
+#         lines.append("*Fechas inválidas (muestra)*")
+#         lines.append(_fmt_items(invalid.get("items", []), ["row","company_code","tx_id","date"]))
+#         lines.append("")
+
+#     if dups.get("count", 0):
+#         lines.append("*Duplicados por clave (muestra)*")
+#         lines.append(_fmt_items(dups.get("items", []), ["row","company_code","tx_id","date","account","debit","credit","currency"]))
+#         lines.append("")
+
+#     if unbal.get("count", 0):
+#         lines.append("*Asientos desbalanceados (muestra)*")
+#         # group_cols + sums/diff ya vienen en items
+#         lines.append(_fmt_items(unbal.get("items", []), ["company_code","tx_id","currency","sum_debit","sum_credit","diff"]))
+#         lines.append("")
+
+#     if reqnull.get("count", 0):
+#         lines.append("*Campos obligatorios nulos (muestra)*")
+#         lines.append(_fmt_items(reqnull.get("items", []), ["row","company_code","tx_id","account","date"]))
+#         lines.append("")
+
+#     # Si todo está OK
+#     if not any([invalid.get("count"), dups.get("count"), unbal.get("count"), reqnull.get("count")]):
+#         lines.append("✅ *Sin incidencias relevantes*")
+
+#     return "\n".join(lines)
 
 
 
@@ -624,6 +726,7 @@ except Exception:
 
 
 async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    print(f"[AUDITS] Reading DB: {DB_PATH.resolve()}")
     rows = get_last_audits(5)  # últimas 5 auditorías
     if not rows:
         return await update.message.reply_text("📭 No hay auditorías registradas todavía.")
@@ -646,9 +749,162 @@ async def audit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# async def audit_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+#     try:
+#         # 0) Config + validaciones
+#         host, token, job_id = _cfg()
+#         if not (host and token and job_id):
+#             return await update.message.reply_text("⚠️ Config de Databricks incompleta. Revisa .env")
+
+#         doc = update.message.document
+#         if not doc or not doc.file_name.lower().endswith(".xlsx"):
+#             return await update.message.reply_text("⚠️ Necesito un Excel .xlsx (envíalo como *documento*).")
+
+#         # 1) Descarga local
+#         await update.message.reply_text("📅 Recibido. Descargando archivo…")
+#         tmp_dir = Path("tmp"); tmp_dir.mkdir(exist_ok=True)
+#         file_name = doc.file_name
+#         local_path = tmp_dir / file_name
+#         tg_file = await context.bot.get_file(doc.file_id)
+#         await tg_file.download_to_drive(str(local_path))
+
+#         # ✅ Verifica cabecera ZIP
+#         print("[DEBUG] Validando contenido real del archivo...")
+#         with open(local_path, "rb") as f:
+#             cabecera = f.read(4)
+#         if cabecera[:2] == b'PK':
+#             print("[OK] Parece un archivo Excel real (.xlsx)")
+#         else:
+#             print("[❌] NO parece un Excel. Posible JSON o formato incorrecto.")
+
+#         # 2) Subida a Workspace
+#         await update.message.reply_text("📤 Subiendo a Workspace Files…")
+#         try:
+#             ws_path = await asyncio.to_thread(subir_a_workspace, str(local_path))
+#         except Exception as e:
+#             return await update.message.reply_text(f"❌ Error al subir archivo a Databricks:\n{e}")
+#         print("[DEBUG] Archivo subido a Workspace:", ws_path)
+
+#         await asyncio.to_thread(listar_y_exportar_archivo_debug, WS_INBOX_DIR, file_name)
+
+#         # 3) Verificación
+#         await update.message.reply_text("🔍 Verificando disponibilidad del archivo en Workspace Files…")
+#         for intento in range(20):
+#             exists = await asyncio.to_thread(verificar_existencia_por_export, ws_path)
+#             if exists:
+#                 print(f"[✅] Archivo encontrado en el intento {intento + 1}.")
+#                 break
+#             await asyncio.sleep(1)
+#         else:
+#             return await update.message.reply_text("⚠️ El archivo aún no está disponible en Workspace Files. Intenta más tarde.")
+
+#         # 4) Lanza auditoría
+#         await update.message.reply_text(
+#             f"✅ Subido: `{ws_path}`\n"
+#             f"🚀 Lanzando auditoría sobre la *última* subida en `{WS_INBOX_DIR}`…",
+#         )
+#         run_id = _run_now_with_ws_path(job_id, ws_path, host, token)
+#         run_url = f"{host}/jobs/runs/{run_id}"
+#         await update.message.reply_text(f"⏳ run_id={run_id}\n{run_url}")
+#         # Guarda el run_id inmediatamente (inicio del seguimiento)
+#         from utils.db import insert_audit
+#         try:
+#             insert_audit(file_name, json.dumps({"status": "running", "run_id": run_id, "path": ws_path}, ensure_ascii=False), run_url=run_url)
+#             print(f"[INFO] run_id {run_id} registrado en SQLite (estado: running)")
+#         except Exception as e:
+#             print(f"[WARN] No se pudo registrar run_id inicial: {e}")
+#             # Añadir archivo a la lista de procesados en sesión
+#         processed_files.append(file_name)
+#         print(f"[SESSION] Archivos procesados en esta sesión: {processed_files}")
+
+
+
+#         # 5) Polling de estado
+#         max_secs, interval = 600, 5
+#         waited, final_state = 0, None
+#         while waited < max_secs:
+#             state = await asyncio.to_thread(_get_state_sync, run_id, host, token)
+#             life = state.get("life_cycle_state")
+#             if life in {"TERMINATED", "INTERNAL_ERROR", "SKIPPED"}:
+#                 final_state = state
+#                 break
+#             await asyncio.sleep(interval)
+#             waited += interval
+#         if not final_state:
+#             return await update.message.reply_text("⏱ Timeout: la ejecución sigue en curso. Intenta luego.")
+
+#         # 6) Leer salida
+#         output, task_run_ids = "", []
+#         for _ in range(24):  # ~120s extra
+#             output = await asyncio.to_thread(_safe_get_output_sync, run_id, host, token)
+#             if output:
+#                 break
+#             if not task_run_ids:
+#                 try:
+#                     task_run_ids = await asyncio.to_thread(_list_task_run_ids_sync, run_id, host, token)
+#                 except Exception:
+#                     task_run_ids = []
+#             for tr in task_run_ids:
+#                 output = await asyncio.to_thread(_safe_get_output_sync, tr, host, token)
+#                 if output:
+#                     break
+#             if output:
+#                 break
+#             await asyncio.sleep(5)
+
+#         if not output:
+#             status = f"{final_state.get('life_cycle_state')}/{final_state.get('result_state')}"
+#             return await update.message.reply_text(
+#                 "⚠️ No pude leer la salida del Job todavía.\n"
+#                 f"Estado final: {status}\n"
+#                 "Asegúrate de que el notebook termina con dbutils.notebook.exit(JSON)."
+#             )
+
+#         # 7) Parsear JSON
+#         try:
+#             summary = json.loads(output) if isinstance(output, str) else output
+#         except Exception as e:
+#             return await update.message.reply_text(
+#                 f"⚠️ Salida no válida (no es JSON parseable): {e}\n\nOutput crudo:\n{output[:2000]}"
+#             )
+
+#         # 8) Resumen bonito con LLM
+#         from utils.llm import summarize_audit_spanish
+#         from utils.db import insert_audit
+#         try:
+#             pretty = summarize_audit_spanish(summary)
+#         except Exception as e:
+#             pretty = None
+
+#         # 9) Guardar en SQLite
+#         try:
+#             insert_audit(file_name, json.dumps(summary, ensure_ascii=False), run_url=run_url, llm_summary=pretty)
+#         except Exception as e:
+#             print(f"[WARN] No se pudo guardar en SQLite: {e}")
+
+#         # 10) Respuesta al usuario
+#         if pretty:
+#             await update.message.reply_text(pretty)
+#         else:
+#             await update.message.reply_markdown(fmt_summary(summary))
+
+#     except Exception as e:
+#         await update.message.reply_text(f"❌ Error inesperado en audit_doc: {e}")
+
+
+# ===== VARIABLES GLOBALES =====
+processed_files = []  # lista global de archivos procesados en la sesión
+
+
+# ===== FUNCIÓN PRINCIPAL DE AUDITORÍA =====
 async def audit_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from utils.db import DB_PATH
+    import os
+    print(f"[AUDIT] Will insert into DB: {DB_PATH.resolve()} | CWD={os.getcwd()}")
+
+    """Flujo principal de auditoría: descarga, subida, ejecución y registro en SQLite."""
     try:
-        # 0) Config + validaciones
+        # 0️⃣ Configuración y validación inicial
         host, token, job_id = _cfg()
         if not (host and token and job_id):
             return await update.message.reply_text("⚠️ Config de Databricks incompleta. Revisa .env")
@@ -657,70 +913,80 @@ async def audit_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not doc or not doc.file_name.lower().endswith(".xlsx"):
             return await update.message.reply_text("⚠️ Necesito un Excel .xlsx (envíalo como *documento*).")
 
-        # 1) Descarga local
+        # 1️⃣ Descarga local
         await update.message.reply_text("📅 Recibido. Descargando archivo…")
-        tmp_dir = Path("tmp"); tmp_dir.mkdir(exist_ok=True)
-        file_name = doc.file_name
-        local_path = tmp_dir / file_name
+        tmp_dir = Path("tmp")
+        tmp_dir.mkdir(exist_ok=True)
+        filename = doc.file_name
+        local_path = tmp_dir / filename
         tg_file = await context.bot.get_file(doc.file_id)
         await tg_file.download_to_drive(str(local_path))
 
-        # ✅ Verifica cabecera ZIP
-        print("[DEBUG] Validando contenido real del archivo...")
+        # Verificar que es un Excel válido (ZIP header)
         with open(local_path, "rb") as f:
-            cabecera = f.read(4)
-        if cabecera[:2] == b'PK':
-            print("[OK] Parece un archivo Excel real (.xlsx)")
-        else:
-            print("[❌] NO parece un Excel. Posible JSON o formato incorrecto.")
+            if f.read(2) == b"PK":
+                print("[OK] Archivo Excel válido (.xlsx)")
+            else:
+                print("[❌] Archivo sospechoso: no parece un ZIP.")
 
-        # 2) Subida a Workspace
+        # 2️⃣ Subida al Workspace Files
         await update.message.reply_text("📤 Subiendo a Workspace Files…")
         try:
             ws_path = await asyncio.to_thread(subir_a_workspace, str(local_path))
         except Exception as e:
             return await update.message.reply_text(f"❌ Error al subir archivo a Databricks:\n{e}")
-        print("[DEBUG] Archivo subido a Workspace:", ws_path)
+        print("[DEBUG] Subida completada:", ws_path)
 
-        await asyncio.to_thread(listar_y_exportar_archivo_debug, WS_INBOX_DIR, file_name)
-
-        # 3) Verificación
-        await update.message.reply_text("🔍 Verificando disponibilidad del archivo en Workspace Files…")
+        # Validar que el archivo está visible en Workspace
+        await update.message.reply_text("🔍 Verificando disponibilidad en Workspace Files…")
         for intento in range(20):
-            exists = await asyncio.to_thread(verificar_existencia_por_export, ws_path)
-            if exists:
-                print(f"[✅] Archivo encontrado en el intento {intento + 1}.")
+            if await asyncio.to_thread(verificar_existencia_por_export, ws_path):
+                print(f"[✅] Archivo visible en intento {intento + 1}.")
                 break
             await asyncio.sleep(1)
         else:
-            return await update.message.reply_text("⚠️ El archivo aún no está disponible en Workspace Files. Intenta más tarde.")
+            return await update.message.reply_text("⚠️ Archivo no disponible aún. Intenta más tarde.")
 
-        # 4) Lanza auditoría
+        # 3️⃣ Lanzar auditoría Databricks
         await update.message.reply_text(
-            f"✅ Subido: `{ws_path}`\n"
-            f"🚀 Lanzando auditoría sobre la *última* subida en `{WS_INBOX_DIR}`…",
+            f"✅ Subido: `{ws_path}`\n🚀 Lanzando auditoría sobre `{WS_INBOX_DIR}`…"
         )
         run_id = _run_now_with_ws_path(job_id, ws_path, host, token)
         run_url = f"{host}/jobs/runs/{run_id}"
         await update.message.reply_text(f"⏳ run_id={run_id}\n{run_url}")
 
-        # 5) Polling de estado
+        # 4️⃣ Registrar ejecución inicial (estado running)
+        from utils.db import insert_audit
+        try:
+            insert_audit(
+                filename,
+                json.dumps({"status": "running", "run_id": run_id, "path": ws_path}, ensure_ascii=False),
+                run_url=run_url,
+            )
+            print(f"[DB] Auditoría inicial registrada: {filename}")
+        except Exception as e:
+            print(f"[WARN] No se pudo registrar run_id inicial: {e}")
+
+        processed_files.append(filename)
+        print(f"[SESSION] Archivos procesados: {processed_files}")
+
+        # 5️⃣ Esperar finalización (polling)
         max_secs, interval = 600, 5
         waited, final_state = 0, None
         while waited < max_secs:
             state = await asyncio.to_thread(_get_state_sync, run_id, host, token)
-            life = state.get("life_cycle_state")
-            if life in {"TERMINATED", "INTERNAL_ERROR", "SKIPPED"}:
+            if state.get("life_cycle_state") in {"TERMINATED", "INTERNAL_ERROR", "SKIPPED"}:
                 final_state = state
                 break
             await asyncio.sleep(interval)
             waited += interval
+
         if not final_state:
             return await update.message.reply_text("⏱ Timeout: la ejecución sigue en curso. Intenta luego.")
 
-        # 6) Leer salida
+        # 6️⃣ Leer salida JSON del job
         output, task_run_ids = "", []
-        for _ in range(24):  # ~120s extra
+        for _ in range(24):  # ~120s de margen
             output = await asyncio.to_thread(_safe_get_output_sync, run_id, host, token)
             if output:
                 break
@@ -740,41 +1006,53 @@ async def audit_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not output:
             status = f"{final_state.get('life_cycle_state')}/{final_state.get('result_state')}"
             return await update.message.reply_text(
-                "⚠️ No pude leer la salida del Job todavía.\n"
-                f"Estado final: {status}\n"
-                "Asegúrate de que el notebook termina con dbutils.notebook.exit(JSON)."
+                f"⚠️ No se pudo leer la salida del Job.\nEstado: {status}"
             )
 
-        # 7) Parsear JSON
+        # 7️⃣ Parsear JSON de salida
         try:
             summary = json.loads(output) if isinstance(output, str) else output
         except Exception as e:
             return await update.message.reply_text(
-                f"⚠️ Salida no válida (no es JSON parseable): {e}\n\nOutput crudo:\n{output[:2000]}"
+                f"⚠️ Salida no válida (no JSON): {e}\n\n{output[:1500]}"
             )
 
-        # 8) Resumen bonito con LLM
+        # 8️⃣ Generar resumen con LLM
         from utils.llm import summarize_audit_spanish
-        from utils.db import insert_audit
         try:
-            pretty = summarize_audit_spanish(summary)
+            llm_summary = summarize_audit_spanish(summary)
         except Exception as e:
-            pretty = None
+            print(f"[WARN] Error en resumen LLM: {e}")
+            llm_summary = None
 
-        # 9) Guardar en SQLite
+        # 9️⃣ Registrar resultado final en SQLite
         try:
-            insert_audit(file_name, json.dumps(summary, ensure_ascii=False), run_url=run_url, llm_summary=pretty)
+            insert_audit(
+                filename,
+                json.dumps(summary, ensure_ascii=False),
+                run_url=run_url,
+                llm_summary=llm_summary,
+            )
+            print(f"[DB] Auditoría final registrada correctamente: {filename}")
         except Exception as e:
-            print(f"[WARN] No se pudo guardar en SQLite: {e}")
+            print(f"[ERROR] No se pudo registrar auditoría final: {e}")
 
-        # 10) Respuesta al usuario
-        if pretty:
-            await update.message.reply_text(pretty)
+        # 🔟 Mostrar resultado al usuario
+        if llm_summary:
+            await update.message.reply_text(llm_summary)
         else:
             await update.message.reply_markdown(fmt_summary(summary))
 
     except Exception as e:
         await update.message.reply_text(f"❌ Error inesperado en audit_doc: {e}")
+
+# ===== COMANDO /SESSION =====
+async def session_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Muestra los archivos procesados en la sesión actual."""
+    if not processed_files:
+        return await update.message.reply_text("📂 Ningún archivo procesado aún en esta sesión.")
+    listado = "\n".join(f"- {f}" for f in processed_files)
+    await update.message.reply_text(f"📁 Archivos procesados en esta sesión:\n{listado}")
 
 
 def register_handlers(app):
@@ -783,6 +1061,8 @@ def register_handlers(app):
 
     app.add_handler(CommandHandler("history", history_cmd))
     app.add_handler(CommandHandler("audit", audit_cmd))
+    app.add_handler(CommandHandler("session", session_cmd))
+
     app.add_handler(
         MessageHandler(
             filters.Document.MimeType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
