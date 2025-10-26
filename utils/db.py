@@ -4,8 +4,13 @@ import sqlite3
 import time
 from pathlib import Path
 from typing import List, Optional, Tuple
+# en utils/db.py (arriba de todo)
+
+print(f"[DB] Using DB at: {Path(os.getenv('SQLITE_PATH', 'audits.db')).resolve()}")
+print(f"[DB] CWD: {os.getcwd()}")
+
 # ============================================================
-# Base configuration
+# 🔹 Configuración base
 # ============================================================
 # Permite sobrescribir la ruta con variable de entorno SQLITE_PATH
 DB_PATH = Path(os.getenv("SQLITE_PATH", "audits.db"))
