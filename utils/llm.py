@@ -33,7 +33,7 @@ def summarize_audit_spanish(summary_json: Dict[str, Any]) -> str:
     """
     prompt = (
         "Formatea el siguiente JSON de auditoría como un resumen claro en español, con títulos y viñetas, "
-        "mostrando totales y hasta 10 ejemplos por cada categoría si existen. Mantén los números tal cual.\n\n"
+        "mostrando totales y todos los ejemplos por cada categoría si existen. Mantén los números tal cual.No respondas mas de lo que se te pide y se conciso en la respuesta\n\n"
         f"JSON:\n{json.dumps(summary_json, ensure_ascii=False)}"
     )
     return chat_simple(prompt, system=SYSTEM_AUDIT)

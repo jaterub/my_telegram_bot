@@ -1,63 +1,79 @@
 # handlers/audits_list.py
-# ────────────────────────────────────────────────
-# Lista las últimas auditorías guardadas en SQLite
+# ------------------------------------------------------------
+# Lista las últimas auditorías guardadas en SQLite (utils.db)
 # Comando: /audits
-# ────────────────────────────────────────────────
+# ------------------------------------------------------------
 
 import datetime as dt
 import json
 from telegram import Update
-from telegram.ext import ContextTypes, CommandHandler
-from db import sqlite_store as store
+from telegram.ext import CommandHandler, ContextTypes
+from utils.db import get_last_audits, init_db
 
 
-def _fmt_ts(ts: float) -> str:
-    """Convierte timestamp en string legible."""
+def _fmt_ts(ts) -> str:
+    """Convierte timestamp (ISO o epoch) a un formato legible."""
+    if ts is None:
+        return "-"
+    # Intento con ISO 8601 (str)
     try:
-        return dt.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+        return dt.datetime.fromisoformat(str(ts)).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        pass
+    # Intento con epoch (float/int)
+    try:
+        return dt.datetime.fromtimestamp(float(ts)).strftime("%Y-%m-%d %H:%M:%S")
     except Exception:
         return str(ts)
 
 
 async def audits_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Muestra las últimas auditorías del usuario."""
-    store.init()
-    rows = store.list_audits(update.effective_chat.id, limit=5)
+    """Muestra las últimas auditorías (incluye ejecuciones en curso)."""
+    init_db()
+    rows = get_last_audits(limit=6)
 
     if not rows:
-        return await update.message.reply_text("No hay auditorías registradas aún.")
+        return await update.message.reply_text("📭 No hay auditorías registradas aún.")
 
     lines = []
-    for r in rows:
-        summary = r["summary"]
+    for (aid, filename, created_at, summary_json, run_url, llm_summary) in rows:
         headline = ""
+        summary = {}
 
-        try:
-            # Si summary es JSON válido → parseamos
-            if isinstance(summary, str):
-                summary = json.loads(summary)
+        if summary_json:
+            try:
+                summary = json.loads(summary_json)
+            except Exception:
+                summary = {}
 
+        if summary and summary.get("status") == "running":
+            run_id = summary.get("run_id", "?")
+            headline = f"⏳ En ejecución (run_id={run_id})"
+        elif summary:
             inv = summary.get("invalid_date", {}).get("count", 0)
             dup = summary.get("duplicates_tx", {}).get("count", 0)
             unb = summary.get("unbalanced_tx", {}).get("count", 0)
             req = summary.get("required_nulls", {}).get("count", 0)
+            inv_cur = summary.get("invalid_currency", {}).get("count", 0)
+            headline = (
+                f"🔁 Duplicadas: {dup}  •  ⚖️ Desbalanceadas: {unb}\n"
+                f"📅 Fechas inválidas: {inv}  •  🧱 Requeridos nulos: {req}\n"
+                f"💱 Monedas inválidas: {inv_cur}"
+            )
+        elif llm_summary:
+            headline = llm_summary.splitlines()[0][:120]
+        else:
+            headline = "(sin resumen disponible)"
 
-            headline = f"invalid_date={inv}, duplicates={dup}, unbalanced={unb}, required_nulls={req}"
-        except Exception:
-            # Si no es JSON → mostramos como texto plano truncado
-            if isinstance(summary, str):
-                headline = (summary[:120] + "…") if len(summary) > 120 else summary
-            else:
-                headline = str(summary)
-
-        # Construir línea de salida
         lines.append(
-            f"#{r['id']} · {r['file_name']} · { _fmt_ts(r['created_at']) }\n"
-            f"  {headline}\n"
-            f"  {r.get('run_url', '')}"
+            f"📄 #{aid} · {filename}\n"
+            f"   🕒 {_fmt_ts(created_at)}\n"
+            f"   {headline}\n"
+            f"   🔗 {run_url or 'Sin enlace'}"
         )
 
-    await update.message.reply_text("📊 Últimas auditorías:\n\n" + "\n".join(lines))
+    body = "\n".join(lines)
+    await update.message.reply_text(f"📊 Últimas auditorías\n\n{body}")
 
 
 def register_handlers(app):
