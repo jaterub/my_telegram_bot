@@ -1,0 +1,282 @@
+# ============================================================
+# 📒 Notebook: audit_xlsx_workspace_summary (bot-friendly)
+# ============================================================
+
+import os, re, io, sys, json, requests, subprocess
+import pandas as pd
+from collections import Counter
+
+# -------- 0) Garantizar openpyxl (necesario para .xlsx) --------
+try:
+    import openpyxl  # noqa
+except Exception:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "openpyxl", "--quiet"])
+    import openpyxl  # noqa
+
+# -------- 1) HOST/TOKEN (contexto -> env -> secrets -> widgets) --------
+def get_host_token():
+    host = os.getenv("DATABRICKS_HOST", "").strip()
+    token = os.getenv("DATABRICKS_TOKEN", "").strip()
+
+    if not host or not token:
+        try:
+            ctx = dbutils.notebook.entry_point.getDbutils().notebook().getContext()
+            host  = host  or ctx.apiUrl().get().rstrip("/")
+            token = token or ctx.apiToken().get()
+        except Exception:
+            pass
+
+    if not host or not token:
+        try:
+            host  = host  or dbutils.secrets.get("bot_scope", "DATABRICKS_HOST").strip()
+            token = token or dbutils.secrets.get("bot_scope", "DATABRICKS_TOKEN").strip()
+        except Exception:
+            pass
+
+    if not host or not token:
+        try:
+            host  = host  or dbutils.widgets.get("DATABRICKS_HOST").strip()
+            token = token or dbutils.widgets.get("DATABRICKS_TOKEN").strip()
+        except Exception:
+            pass
+
+    if not host or not token:
+        raise RuntimeError("Faltan HOST/TOKEN (contexto/env/secrets/widgets).")
+    return host, token
+
+HOST, TOKEN = get_host_token()
+
+# ws_path (opcional exacto) / ws_dir (carpeta)
+def get_param(name, default=""):
+    try:
+        v = dbutils.widgets.get(name).strip()
+        return v or default
+    except Exception:
+        return os.getenv(name.upper(), default).strip() or default
+
+WS_PATH = get_param("ws_path", "")
+WS_DIR  = get_param("ws_dir", "/Users/ja.tejeror@gmail.com/bot_audit")
+
+# -------- 2) Workspace Files helpers --------
+session = requests.Session()
+session.headers.update({"Authorization": f"Bearer {TOKEN}"})
+
+def ws_list(dir_path: str):
+    r = session.get(f"{HOST}/api/2.0/workspace/list", params={"path": dir_path}, timeout=30)
+    if r.status_code == 404:
+        return []
+    r.raise_for_status()
+    return r.json().get("objects", [])
+
+def ws_get_status(path: str):
+    r = session.get(f"{HOST}/api/2.0/workspace/get-status", params={"path": path}, timeout=30)
+    r.raise_for_status()
+    return r.json()
+
+def ws_export_bytes(path: str) -> bytes:
+    r = session.get(f"{HOST}/api/2.0/workspace/export",
+                    params={"path": path, "format": "SOURCE", "direct_download": "true"},
+                    timeout=60)
+    r.raise_for_status()
+    return r.content
+
+# -------- 3) Seleccionar archivo: ws_path exacto o último .xlsx en ws_dir --------
+if not WS_PATH:
+    objs = ws_list(WS_DIR)
+    xlsx = [o for o in objs if o.get("object_type") == "FILE" and o["path"].lower().endswith(".xlsx")]
+    if not xlsx:
+        dbutils.notebook.exit(json.dumps(
+            {"error": "NO_XLSX", "meta": {"source": "Workspace Files", "path": WS_DIR}},
+            ensure_ascii=False
+        ))
+    def modified_at(path):
+        try:
+            return int(ws_get_status(path).get("modified_at", 0))
+        except Exception:
+            return 0
+    selected = sorted(xlsx, key=lambda o: modified_at(o["path"]), reverse=True)[0]
+    WS_PATH = selected["path"]
+
+fname = WS_PATH.split("/")[-1]
+
+# -------- 4) Leer Excel EN MEMORIA --------
+try:
+    binary = ws_export_bytes(WS_PATH)
+    pdf = pd.read_excel(io.BytesIO(binary), sheet_name=0, dtype="string", engine="openpyxl")
+except Exception as e:
+    dbutils.notebook.exit(json.dumps(
+        {"error": "READ_EXCEL", "msg": str(e), "meta": {"path": WS_PATH, "filename": fname}},
+        ensure_ascii=False
+    ))
+
+rows_total = len(pdf)
+pdf_orig = pdf.copy()
+pdf.columns = [str(c).strip() for c in pdf.columns]
+
+# -------- 5) Mapeo de columnas -> nombres canónicos --------
+ALIAS = {
+    "company": "company_code", "comp_code": "company_code", "sociedad": "company_code", "empresa": "company_code",
+    "company_code": "company_code",
+    "tx_id": "tx_id", "trans_id": "tx_id", "id_transaccion": "tx_id", "asiento": "tx_id",
+    "date": "date", "posting_date": "date", "fecha": "date", "fecha contable": "date",
+    "account": "account", "cuenta": "account", "gl_account": "account",
+    "debit": "debit", "debe": "debit",
+    "credit": "credit", "haber": "credit",
+    "amount": "amount",
+    "currency": "currency", "moneda": "currency",
+}
+
+canon_cols = {}    # real_name -> canonical
+real_of = {}      # canonical -> real_name (primera coincidencia)
+for c in pdf.columns:
+    key = re.sub(r"\s+", " ", c.lower())
+    can = ALIAS.get(key, c)
+    canon_cols[c] = can
+    if can not in real_of:
+        real_of[can] = c  # conserva el primero que ve
+
+def has(canon): return canon in real_of
+def rv(canon):  return real_of.get(canon)  # real name
+
+# -------- 6) Utilidades de parseo --------
+def clean_str(s: pd.Series) -> pd.Series:
+    s = s.astype("string").str.strip()
+    return s.replace({"": pd.NA, "nan": pd.NA, "NaN": pd.NA, "NaT": pd.NA})
+
+def to_number(s: pd.Series) -> pd.Series:
+    s = clean_str(s)
+    s = s.str.replace(r"[^\d,\.\-\(\)]", "", regex=True)
+    s = s.str.replace(r"^\((.*)\)$", r"-\1", regex=True)
+    s = s.str.replace(".", "", regex=False)
+    s = s.str.replace(",", ".", regex=False)
+    return pd.to_numeric(s, errors="coerce")
+
+def to_date_ymd(s: pd.Series) -> pd.Series:
+    s = clean_str(s).str.replace(r"[./]", "-", regex=True)
+    out = pd.Series(pd.NaT, index=s.index, dtype="datetime64[ns]")
+    mask_num = s.str.fullmatch(r"\d+").fillna(False)
+    if mask_num.any():
+        out.loc[mask_num] = pd.to_datetime(s[mask_num].astype(float), unit="D",
+                                           origin="1899-12-30", errors="coerce")
+    mask_txt = ~mask_num
+    if mask_txt.any():
+        p = pd.to_datetime(s[mask_txt], errors="coerce", infer_datetime_format=True, dayfirst=True)
+        still = p.isna()
+        if still.any():
+            p2 = pd.to_datetime(s[mask_txt][still], errors="coerce", infer_datetime_format=True, dayfirst=False)
+            p[still] = p2
+        out.loc[mask_txt] = p
+    res = out.dt.strftime("%Y-%m-%d")
+    return res.where(~out.isna(), None)
+
+# -------- 7) Construir secciones para summary compatible con fmt_summary --------
+MAX_ITEMS = 10
+
+# 7.1 Fechas inválidas
+invalid_date = {"count": 0, "items": []}
+if has("date"):
+    s_raw = pdf_orig[rv("date")]
+    parsed = to_date_ymd(s_raw)
+    mask_bad = parsed.isna() & s_raw.notna()
+    invalid_date["count"] = int(mask_bad.sum())
+    if invalid_date["count"] > 0:
+        idxs = list(mask_bad[mask_bad].index)[:MAX_ITEMS]
+        for i in idxs:
+            item = {
+                "row": int(i) + 2,
+                "date": str(s_raw.iloc[i]),
+            }
+            if has("company_code"): item["company_code"] = str(pdf_orig[rv("company_code")].iloc[i])
+            if has("tx_id"):        item["tx_id"]        = str(pdf_orig[rv("tx_id")].iloc[i])
+            invalid_date["items"].append(item)
+
+# 7.2 Duplicados por (company_code, tx_id)
+duplicates_tx = {"count": 0, "items": []}
+if has("company_code") and has("tx_id"):
+    pair = pdf_orig[[rv("company_code"), rv("tx_id")]].astype("string")
+    mask_dup = pair.duplicated(keep=False) & pair.notna().all(axis=1)
+    duplicates_tx["count"] = int(mask_dup.sum())
+    if duplicates_tx["count"] > 0:
+        idxs = list(mask_dup[mask_dup].index)[:MAX_ITEMS]
+        for i in idxs:
+            item = {
+                "row": int(i) + 2,
+                "company_code": str(pair.iloc[i, 0]),
+                "tx_id":        str(pair.iloc[i, 1]),
+            }
+            # añadir contexto si existen
+            if has("date"):     item["date"]     = str(pdf_orig[rv("date")].iloc[i])
+            if has("account"):  item["account"]  = str(pdf_orig[rv("account")].iloc[i])
+            if has("debit"):    item["debit"]    = str(pdf_orig[rv("debit")].iloc[i])
+            if has("credit"):   item["credit"]   = str(pdf_orig[rv("credit")].iloc[i])
+            if has("currency"): item["currency"] = str(pdf_orig[rv("currency")].iloc[i])
+            duplicates_tx["items"].append(item)
+
+# 7.3 Obligatorios nulos
+required_nulls = {"count": 0, "items": []}
+REQUIRED = ["company_code", "tx_id", "date", "account"]
+for req in REQUIRED:
+    if has(req):
+        col = pdf_orig[rv(req)]
+        bad = col.isna()
+        required_nulls["count"] += int(bad.sum())
+        if bad.any():
+            idxs = list(bad[bad].index)[:MAX_ITEMS]
+            for i in idxs:
+                item = {"row": int(i) + 2}
+                # añade snapshot de campos clave si existen
+                if has("company_code"): item["company_code"] = str(pdf_orig[rv("company_code")].iloc[i])
+                if has("tx_id"):        item["tx_id"]        = str(pdf_orig[rv("tx_id")].iloc[i])
+                if has("account"):      item["account"]      = str(pdf_orig[rv("account")].iloc[i])
+                if has("date"):         item["date"]         = str(pdf_orig[rv("date")].iloc[i])
+                item["col"] = req
+                required_nulls["items"].append(item)
+
+# 7.4 Desbalance por grupo (si existen debit/credit)
+unbalanced_tx = {"count": 0, "items": []}
+if has("debit") and has("credit"):
+    d = to_number(pdf_orig[rv("debit")]).fillna(0.0)
+    h = to_number(pdf_orig[rv("credit")]).fillna(0.0)
+    df_tmp = pd.DataFrame({"debit": d, "credit": h})
+    # claves de agrupación más informativas posibles
+    keys = [k for k in ["company_code", "tx_id", "currency"] if has(k)]
+    if keys:
+        for k in keys:
+            df_tmp[k] = pdf_orig[rv(k)].astype("string")
+        grp = df_tmp.groupby(keys, dropna=False).agg(sum_debit=("debit","sum"),
+                                                    sum_credit=("credit","sum"))
+        grp["diff"] = grp["sum_debit"] - grp["sum_credit"]
+        bad = grp[grp["diff"].abs() > 1e-6]
+        unbalanced_tx["count"] = int(len(bad))
+        if unbalanced_tx["count"] > 0:
+            # construir items
+            for idx, row in bad.head(MAX_ITEMS).reset_index().iterrows():
+                it = {k: str(row[k]) for k in keys}
+                it["sum_debit"]  = float(row["sum_debit"])
+                it["sum_credit"] = float(row["sum_credit"])
+                it["diff"]       = float(row["diff"])
+                unbalanced_tx["items"].append(it)
+    else:
+        # sin claves; sólo indicador agregado
+        diff = float(d.sum() - h.sum())
+        if abs(diff) > 1e-6:
+            unbalanced_tx["count"] = 1
+            unbalanced_tx["items"] = []
+
+# -------- 8) Construir summary compatible con fmt_summary --------
+summary = {
+    "meta": {
+        "source": "Workspace Files",
+        "path": WS_PATH,
+        "filename": fname,
+        "rows_pandas_raw": rows_total,
+    },
+    "rows": rows_total,
+    "invalid_date":   invalid_date,
+    "duplicates_tx":  duplicates_tx,
+    "unbalanced_tx":  unbalanced_tx,
+    "required_nulls": required_nulls,
+}
+
+# -------- 9) Devolver a tu bot --------
+dbutils.notebook.exit(json.dumps(summary, ensure_ascii=False))
