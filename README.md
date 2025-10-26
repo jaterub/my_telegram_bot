@@ -2,16 +2,14 @@
 
 [![Demo del Bot](demo/thumbnail_bot.png)](demo/bot_demo.mp4)
 
-> Consejo: si publicas el vídeo en GitHub Releases o en YouTube, puedes reemplazar el enlace anterior por una URL pública (ej. `https://youtu.be/XXXXXXX`) para evitar que el repo crezca con archivos binarios pesados.
-
 ## Contenido
 
-- [Descripción general](#descripción-general)
-- [Flujo de trabajo](#flujo-de-trabajo)
-- [Comandos disponibles](#comandos-disponibles)
-- [Arquitectura técnica](#arquitectura-técnica)
-- [Configuración y despliegue](#configuración-y-despliegue)
-- [Guía rápida de contribución](#guía-rápida-de-contribución)
+-   [Descripción general](#descripción-general)
+-   [Flujo de trabajo](#flujo-de-trabajo)
+-   [Comandos disponibles](#comandos-disponibles)
+-   [Arquitectura técnica](#arquitectura-técnica)
+-   [Configuración y despliegue](#configuración-y-despliegue)
+-   [Guía rápida de contribución](#guía-rápida-de-contribución)
 
 ## Descripción general
 
@@ -28,27 +26,27 @@ Auditor Master Bot es un asistente de Telegram orientado a auditorías contables
 
 ## Comandos disponibles
 
-- `/audit`: sube un Excel y ejecuta la auditoría completa.
-- `/audits`: lista las últimas auditorías con métricas clave.
-- `/history`: historial compacto con `llm_summary` si está disponible.
-- `/session`: muestra los archivos procesados en la sesión actual.
-- `/chat`: activa el modo conversación con el LLM (texto y voz).
-- `/reset`: limpia el historial de conversación del LLM.
+-   `/audit`: sube un Excel y ejecuta la auditoría completa.
+-   `/audits`: lista las últimas auditorías con métricas clave.
+-   `/history`: historial compacto con `llm_summary` si está disponible.
+-   `/session`: muestra los archivos procesados en la sesión actual.
+-   `/chat`: activa el modo conversación con el LLM (texto y voz).
+-   `/reset`: limpia el historial de conversación del LLM.
 
 Los mensajes sin comando también se envían al LLM cuando el modo chat está activo.
 
 ## Arquitectura técnica
 
-- **Handlers de Telegram** (`handlers/`):
-  - `audit_xlsx.py`: flujo principal de auditoría y registro en SQLite.
-  - `audits_list.py`, `history.py`: comandos de consulta.
-  - `llm_chat.py`: conversación contextual usando los resultados más recientes.
-- **Integraciones**:
-  - `utils/databricks_upload.py` y `wsfiles_check.py`: interacción con Workspace Files.
-  - `utils/llm.py`: acceso a OpenAI (chat y Whisper).
-- **Persistencia**:
-  - `utils/db.py`: esquema único (tabla `audits`) con upsert por `run_url`.
-  - `audits.db`: base SQLite alojada localmente (ruta configurable via `SQLITE_PATH`).
+-   **Handlers de Telegram** (`handlers/`):
+    -   `audit_xlsx.py`: flujo principal de auditoría y registro en SQLite.
+    -   `audits_list.py`, `history.py`: comandos de consulta.
+    -   `llm_chat.py`: conversación contextual usando los resultados más recientes.
+-   **Integraciones**:
+    -   `utils/databricks_upload.py` y `wsfiles_check.py`: interacción con Workspace Files.
+    -   `utils/llm.py`: acceso a OpenAI (chat y Whisper).
+-   **Persistencia**:
+    -   `utils/db.py`: esquema único (tabla `audits`) con upsert por `run_url`.
+    -   `audits.db`: base SQLite alojada localmente (ruta configurable via `SQLITE_PATH`).
 
 ## Configuración y despliegue
 
